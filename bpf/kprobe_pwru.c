@@ -48,7 +48,7 @@ struct tuple {
 	u8 pad[7];
 } __attribute__((packed));;
 
-u64 print_skb_id = 0;
+u64 print_id = 0;
 
 struct event_t {
 	u32 pid;
@@ -56,7 +56,8 @@ struct event_t {
 	u64 addr;
 	u64 skb_addr;
 	u64 ts;
-	typeof(print_skb_id) print_skb_id;
+	typeof(print_id) print_skb_id;
+	//typeof(print_id) print_ret_id;
 	struct skb_meta meta;
 	struct tuple tuple;
 	u16 pad;
@@ -80,7 +81,28 @@ struct {
 	__type(key, u32);
 	__type(value, char[PRINT_SKB_STR_SIZE]);
 } print_skb_map SEC(".maps");
-#endif
+
+#define MAX_STACK_DEPTH 20
+
+struct stack {
+       u64 ip[MAX_STACK_DEPTH];
+       u8 len;
+};
+
+struct {
+       __uint(type, BPF_MAP_TYPE_LRU_PERCPU_HASH);
+       __uint(max_entries, 256);
+       __type(key, u64);
+       __type(value, struct stack);
+} kprobe_stack_map SEC(".maps");
+
+//struct {
+//	__uint(type, BPF_MAP_TYPE_HASH);
+//	__uint(max_entries, 2048);
+//	__type(key, u64);
+//	__type(value, u32);
+//} ret_type_map SEC(".maps");
+#endif /* OUTPUT_SKB */
 
 static __always_inline bool
 filter_mark(struct sk_buff *skb) {
@@ -227,15 +249,15 @@ set_tuple(struct sk_buff *skb, struct tuple *tpl) {
 }
 
 static __always_inline void
-set_skb_btf(struct sk_buff *skb, typeof(print_skb_id) *event_id) {
+set_skb_btf(struct sk_buff *skb, typeof(print_id) *event_id) {
 #ifdef OUTPUT_SKB
 	static struct btf_ptr p = {};
-	typeof(print_skb_id) id;
+	typeof(print_id) id;
 	char *str;
 
 	p.type_id = bpf_core_type_id_kernel(struct sk_buff);
 	p.ptr = skb;
-	id = __sync_fetch_and_add(&print_skb_id, 1) % 256;
+	id = __sync_fetch_and_add(&print_id, 1) % 256;
 
 	str = bpf_map_lookup_elem(&print_skb_map, (u32 *)&id);
 	if (!str)
@@ -248,8 +270,55 @@ set_skb_btf(struct sk_buff *skb, typeof(print_skb_id) *event_id) {
 #endif
 }
 
-static __always_inline void
-set_output(struct sk_buff *skb, struct event_t *event) {
+#ifdef OUTPUT_SKB
+static __noinline u64
+get_ip(bool kprobe, u64 ip) {
+	struct stack *stack;
+	u64 key, ret_ip;
+
+	key = bpf_get_current_pid_tgid();
+
+	if (kprobe) {
+		stack = bpf_map_lookup_elem(&kprobe_stack_map, &key);
+
+		if (!stack) {
+			struct stack new_stack = {0};
+			bpf_map_update_elem(&kprobe_stack_map, &key, &new_stack, 0);
+			stack = bpf_map_lookup_elem(&kprobe_stack_map, &key);
+			if (!stack)
+				return 0;
+		}
+
+		if (stack->len >= MAX_STACK_DEPTH)
+			return 0;
+
+		ret_ip = ip-1;
+		stack->ip[stack->len] = ret_ip;
+		stack->len++;
+		return ret_ip;
+	}
+
+	// kretprobe
+
+	stack = bpf_map_lookup_elem(&kprobe_stack_map, &key);
+	if (!stack)
+		return 0;
+
+	if (stack->len >= MAX_STACK_DEPTH || stack->len < 0)
+		return 0;
+
+	stack->len--;
+
+	if (stack->len >= MAX_STACK_DEPTH || stack->len < 0)
+		return 0;
+
+	ret_ip = stack->ip[stack->len];
+	return ret_ip;
+}
+#endif /* OUTPUT_SKB */
+
+static void
+set_output(struct sk_buff *skb, struct event_t *event, bool kprobe) {
 	u32 key;
 
 	key = CFG_OUTPUT_META;
@@ -263,22 +332,58 @@ set_output(struct sk_buff *skb, struct event_t *event) {
 	key = CFG_OUTPUT_SKB;
 	if (bpf_map_lookup_elem(&cfg_map, &key))
 		set_skb_btf(skb, &event->print_skb_id);
+
+#ifdef OUTPUT_SKB
+	u64 ip = get_ip(kprobe, event->addr);
+	char fmt[] = "get_ip: %x %d %x\n";
+	bpf_trace_printk(fmt, sizeof(fmt), bpf_get_current_pid_tgid(), kprobe, ip);
+
+#if 0
+	if (kprobe)
+		return;
+
+	char fmt1[] = "get_ip1: %x %d %x\n";
+	u32 *type_id = bpf_map_lookup_elem(&ret_type_map, &ip);
+        if (!type_id) {
+		bpf_trace_printk(fmt1, sizeof(fmt1), bpf_get_current_pid_tgid(), kprobe, ip);
+                return;
+        }
+
+	static struct btf_ptr p = {};
+	char *str;
+	typeof(print_id) id;
+        p.type_id = *type_id;
+        p.ptr = (void *) ret;
+        id = __sync_fetch_and_add(&print_id, 1) % 256;
+        str = bpf_map_lookup_elem(&print_skb_map, (u32 *)&id);
+        if (!str)
+                return;
+        if (bpf_snprintf_btf(str, PRINT_SKB_STR_SIZE, &p, sizeof(p), 0) < 0) {
+                //bpf_trace_printk(fmt1, sizeof(fmt1), p.ptr);
+                return;
+        }
+        event->print_ret_id = id;
+#endif
+
+#endif
 }
 
 static __always_inline int
-handle_everything(struct sk_buff *skb, struct pt_regs *ctx)
+handle_everything(struct sk_buff *skb, struct pt_regs *ctx, bool kprobe)
 {
 	struct event_t event = {};
 
 	if (!filter(skb))
 		return 0;
 
-	set_output(skb, &event);
-
 	event.pid = bpf_get_current_pid_tgid();
 	event.addr = PT_REGS_IP(ctx);
 	event.skb_addr = (u64)skb;
 	event.ts = bpf_ktime_get_ns();
+
+	//set_output(skb, &event, kprobe, PT_REGS_RC(ctx));
+	set_output(skb, &event, kprobe);
+
 	bpf_perf_event_output(ctx, &events, BPF_F_CURRENT_CPU, &event, sizeof(event));
 
 	return 0;
@@ -288,35 +393,70 @@ SEC("kprobe/skb-1")
 int kprobe_skb_1(struct pt_regs *ctx) {
 	struct sk_buff *skb = (struct sk_buff *)PT_REGS_PARM1(ctx);
 
-	return handle_everything(skb, ctx);
+	return handle_everything(skb, ctx, true);
 }
 
 SEC("kprobe/skb-2")
 int kprobe_skb_2(struct pt_regs *ctx) {
 	struct sk_buff *skb = (struct sk_buff *)PT_REGS_PARM2(ctx);
 
-	return handle_everything(skb, ctx);
+	return handle_everything(skb, ctx, true);
 }
 
 SEC("kprobe/skb-3")
 int kprobe_skb_3(struct pt_regs *ctx) {
 	struct sk_buff *skb = (struct sk_buff *)PT_REGS_PARM3(ctx);
 
-	return handle_everything(skb, ctx);
+	return handle_everything(skb, ctx, true);
 }
 
 SEC("kprobe/skb-4")
 int kprobe_skb_4(struct pt_regs *ctx) {
 	struct sk_buff *skb = (struct sk_buff *)PT_REGS_PARM4(ctx);
 
-	return handle_everything(skb, ctx);
+	return handle_everything(skb, ctx, true);
 }
 
 SEC("kprobe/skb-5")
 int kprobe_skb_5(struct pt_regs *ctx) {
 	struct sk_buff *skb = (struct sk_buff *)PT_REGS_PARM5(ctx);
 
-	return handle_everything(skb, ctx);
+	return handle_everything(skb, ctx, true);
+}
+
+SEC("kretprobe/skb-1")
+int kretprobe_skb_1(struct pt_regs *ctx) {
+	struct sk_buff *skb = (struct sk_buff *)PT_REGS_PARM1(ctx);
+
+	return handle_everything(skb, ctx, false);
+}
+
+SEC("kretprobe/skb-2")
+int kretprobe_skb_2(struct pt_regs *ctx) {
+	struct sk_buff *skb = (struct sk_buff *)PT_REGS_PARM2(ctx);
+
+	return handle_everything(skb, ctx, false);
+}
+
+SEC("kretprobe/skb-3")
+int kretprobe_skb_3(struct pt_regs *ctx) {
+	struct sk_buff *skb = (struct sk_buff *)PT_REGS_PARM3(ctx);
+
+	return handle_everything(skb, ctx, false);
+}
+
+SEC("kretprobe/skb-4")
+int kretprobe_skb_4(struct pt_regs *ctx) {
+	struct sk_buff *skb = (struct sk_buff *)PT_REGS_PARM4(ctx);
+
+	return handle_everything(skb, ctx, false);
+}
+
+SEC("kretprobe/skb-5")
+int kretprobe_skb_5(struct pt_regs *ctx) {
+	struct sk_buff *skb = (struct sk_buff *)PT_REGS_PARM5(ctx);
+
+	return handle_everything(skb, ctx, false);
 }
 
 char __license[] SEC("license") = "GPL";

@@ -34,8 +34,9 @@ type Foo interface {
 
 func main() {
 	var (
-		kprobe1, kprobe2, kprobe3, kprobe4, kprobe5 *ebpf.Program
-		cfgMap, events, printSkbMap                 *ebpf.Map
+		kprobe1, kprobe2, kprobe3, kprobe4, kprobe5                *ebpf.Program
+		kretprobe1, kretprobe2, kretprobe3, kretprobe4, kretprobe5 *ebpf.Program
+		cfgMap, events, printSkbMap, retTypeMap                    *ebpf.Map
 	)
 
 	flags := pwru.Flags{
@@ -72,13 +73,9 @@ func main() {
 	}()
 	defer stop()
 
-	funcs, err := pwru.GetFuncs()
+	funcs, err := pwru.NewFuncs()
 	if err != nil {
 		log.Fatalf("Failed to get skb-accepting functions: %s", err)
-	}
-	addr2name, err := pwru.GetAddrs(funcs)
-	if err != nil {
-		log.Fatalf("Failed to get function addrs: %s", err)
 	}
 
 	if *flags.OutputSkb {
@@ -92,9 +89,15 @@ func main() {
 		kprobe3 = objs.KprobeSkb3
 		kprobe4 = objs.KprobeSkb4
 		kprobe5 = objs.KprobeSkb5
+		kretprobe1 = objs.KretprobeSkb1
+		kretprobe2 = objs.KretprobeSkb2
+		kretprobe3 = objs.KretprobeSkb3
+		kretprobe4 = objs.KretprobeSkb4
+		kretprobe5 = objs.KretprobeSkb5
 		cfgMap = objs.CfgMap
 		events = objs.Events
 		printSkbMap = objs.PrintSkbMap
+		//retTypeMap = objs.RetTypeMap
 	} else {
 		objs := KProbePWRUWithoutOutputSKBObjects{}
 		if err := LoadKProbePWRUWithoutOutputSKBObjects(&objs, nil); err != nil {
@@ -110,24 +113,34 @@ func main() {
 		events = objs.Events
 	}
 
-	pwru.ConfigBPFMap(&flags, cfgMap)
+	pwru.ConfigBPFMap(&flags, cfgMap, retTypeMap, funcs)
 
 	log.Println("Attaching kprobes...")
 	ignored := 0
-	bar := pb.StartNew(len(funcs))
-	for name, pos := range funcs {
-		fn := kprobe1
-		switch pos {
+	funcsLen := funcs.Len()
+	if *flags.OutputSkb {
+		funcsLen *= 2
+	}
+	bar := pb.StartNew(funcsLen)
+	for name, meta := range funcs.GetMeta() {
+		kpfn := kprobe1
+		krpfn := kretprobe1
+		switch meta.SkbPos {
 		case 1:
-			fn = kprobe1
+			kpfn = kprobe1
+			krpfn = kretprobe1
 		case 2:
-			fn = kprobe2
+			kpfn = kprobe2
+			krpfn = kretprobe2
 		case 3:
-			fn = kprobe3
+			kpfn = kprobe3
+			krpfn = kretprobe3
 		case 4:
-			fn = kprobe4
+			kpfn = kprobe4
+			krpfn = kretprobe4
 		case 5:
-			fn = kprobe5
+			kpfn = kprobe5
+			krpfn = kretprobe5
 		default:
 			ignored += 1
 			continue
@@ -138,7 +151,7 @@ func main() {
 		default:
 		}
 
-		kp, err := link.Kprobe(name, fn)
+		kp, err := link.Kprobe(name, kpfn)
 		bar.Increment()
 		if err != nil {
 			if !errors.Is(err, os.ErrNotExist) {
@@ -148,6 +161,19 @@ func main() {
 			}
 		} else {
 			defer kp.Close()
+		}
+		if *flags.OutputSkb {
+			krp, err := link.Kretprobe(name, krpfn)
+			bar.Increment()
+			if err != nil {
+				if !errors.Is(err, os.ErrNotExist) {
+					log.Fatalf("Opening kretprobe %s: %s\n", name, err)
+				} else {
+					ignored += 1
+				}
+			} else {
+				defer krp.Close()
+			}
 		}
 	}
 	bar.Finish()
@@ -169,7 +195,7 @@ func main() {
 
 	log.Println("Listening for events..")
 
-	output := pwru.NewOutput(&flags, printSkbMap, addr2name)
+	output := pwru.NewOutput(&flags, printSkbMap, funcs)
 
 	var event pwru.Event
 	for {

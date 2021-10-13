@@ -13,12 +13,49 @@ import (
 	"github.com/cilium/ebpf/pkg/btf"
 )
 
-type Funcs map[string]int
+type funcMeta struct {
+	SkbPos       int
+	RetBTFTypeID uint32
+	Addr         uint64
+}
 
-type Addr2Name map[uint64]string
+type Funcs struct {
+	meta map[string]funcMeta
+	addr map[uint64]string
+}
 
-func GetAddrs(funcs Funcs) (Addr2Name, error) {
-	a2n := Addr2Name{}
+func NewFuncs() (*Funcs, error) {
+	m, err := getFuncsMeta()
+	if err != nil {
+		return nil, err
+	}
+	a, err := setAddrs(&m)
+	if err != nil {
+		return nil, err
+	}
+
+	f := &Funcs{
+		meta: m,
+		addr: a,
+	}
+
+	return f, nil
+}
+
+func (f *Funcs) GetNameByAddr(addr uint64) string {
+	return f.addr[addr]
+}
+
+func (f *Funcs) Len() int {
+	return len(f.meta)
+}
+
+func (f *Funcs) GetMeta() map[string]funcMeta {
+	return f.meta
+}
+
+func setAddrs(meta *map[string]funcMeta) (map[uint64]string, error) {
+	a2n := map[uint64]string{}
 
 	file, err := os.Open("/proc/kallsyms")
 	if err != nil {
@@ -30,12 +67,15 @@ func GetAddrs(funcs Funcs) (Addr2Name, error) {
 	for scanner.Scan() {
 		line := strings.Split(scanner.Text(), " ")
 		name := line[2]
-		if _, found := funcs[name]; found {
+		if m, found := (*meta)[name]; found {
 			addr, err := strconv.ParseUint(line[0], 16, 64)
 			if err != nil {
 				return nil, err
 			}
 			a2n[addr] = name
+			m.Addr = addr
+			(*meta)[name] = m
+
 		}
 	}
 	if err := scanner.Err(); err != nil {
@@ -45,8 +85,8 @@ func GetAddrs(funcs Funcs) (Addr2Name, error) {
 	return a2n, nil
 }
 
-func GetFuncs() (Funcs, error) {
-	funcs := Funcs{}
+func getFuncsMeta() (map[string]funcMeta, error) {
+	metas := map[string]funcMeta{}
 
 	spec, err := btf.LoadKernelSpec()
 	if err != nil {
@@ -60,8 +100,13 @@ func GetFuncs() (Funcs, error) {
 		for _, p := range fnProto.Params {
 			if ptr, ok := p.Type.(*btf.Pointer); ok {
 				if strct, ok := ptr.Target.(*btf.Struct); ok {
-					if strct.Name == "sk_buff" && i <= 5 {
-						funcs[string(fn.Name)] = i
+					//if strct.Name == "sk_buff" && i <= 5 {
+					if strct.Name == "sk_buff" && i == 1 {
+						meta := funcMeta{
+							SkbPos:       i,
+							RetBTFTypeID: uint32(fnProto.Return.ID()),
+						}
+						metas[string(fn.Name)] = meta
 						return
 					}
 				}
@@ -72,5 +117,5 @@ func GetFuncs() (Funcs, error) {
 	fn := &btf.Func{}
 	spec.Iterate(callback, fn)
 
-	return funcs, nil
+	return metas, nil
 }

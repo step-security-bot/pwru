@@ -55,6 +55,7 @@ type Event struct {
 	SAddr      uint64
 	Timestamp  uint64
 	PrintSkbId uint64
-	Meta       Meta
-	Tuple      Tuple
+	//PrintRetId uint64
+	Meta  Meta
+	Tuple Tuple
 }

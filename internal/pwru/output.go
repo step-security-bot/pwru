@@ -19,15 +19,15 @@ type output struct {
 	flags       *Flags
 	lastSeenSkb map[uint64]uint64 // skb addr => last seen TS
 	printSkbMap *ebpf.Map
-	addr2name   Addr2Name
+	funcs       *Funcs
 }
 
-func NewOutput(flags *Flags, printSkbMap *ebpf.Map, addr2Name Addr2Name) *output {
+func NewOutput(flags *Flags, printSkbMap *ebpf.Map, funcs *Funcs) *output {
 	return &output{
 		flags:       flags,
 		lastSeenSkb: map[uint64]uint64{},
 		printSkbMap: printSkbMap,
-		addr2name:   addr2Name,
+		funcs:       funcs,
 	}
 }
 
@@ -45,7 +45,7 @@ func (o *output) Print(event *Event) {
 			ts = 0
 		}
 	}
-	fmt.Printf("0x%x [%s] %s %-10d", event.SAddr, execName, o.addr2name[event.Addr-1], ts)
+	fmt.Printf("0x%x [%s] %s %-10d", event.SAddr, execName, o.funcs.GetNameByAddr(event.Addr-1), ts)
 	o.lastSeenSkb[event.SAddr] = event.Timestamp
 
 	if *o.flags.OutputMeta {

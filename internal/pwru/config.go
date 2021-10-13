@@ -15,7 +15,7 @@ import (
 	"github.com/cilium/ebpf"
 )
 
-func ConfigBPFMap(flags *Flags, cfgMap *ebpf.Map) {
+func ConfigBPFMap(flags *Flags, cfgMap, retTypeMap *ebpf.Map, funcs *Funcs) {
 	if *flags.FilterMark != 0 {
 		key := uint32(CFG_FILTER_KEY_MARK)
 		val := uint32(*flags.FilterMark)
@@ -108,5 +108,15 @@ func ConfigBPFMap(flags *Flags, cfgMap *ebpf.Map) {
 		if err := cfgMap.Update(key, val, 0); err != nil {
 			log.Fatalf("Failed to set output skb: %w", err)
 		}
+
+		//for _, m := range funcs.GetMeta() {
+		//	key := m.Addr + 1
+		//	val := m.RetBTFTypeID
+		//	if err := retTypeMap.Update(key, val, 0); err != nil {
+		//		log.Fatalf("Failed to set return type: %s", err)
+
+		//	}
+		//}
+
 	}
 }
