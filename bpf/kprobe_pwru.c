@@ -371,7 +371,8 @@ handle_everything(struct sk_buff *skb, struct pt_regs *ctx) {
 	}
 
 	event.pid = bpf_get_current_pid_tgid();
-	event.addr = PT_REGS_IP(ctx);
+	//event.addr = PT_REGS_IP(ctx);
+	event.addr = bpf_get_func_ip(ctx);
 	event.skb_addr = (u64) skb;
 	event.ts = bpf_ktime_get_ns();
 	event.cpu_id = bpf_get_smp_processor_id();

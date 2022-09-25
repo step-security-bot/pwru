@@ -60,7 +60,8 @@ func (o *output) Print(event *Event) {
 	// XXX: not sure why the -1 offset is needed on x86 but not on arm64
 	switch runtime.GOARCH {
 	case "amd64":
-		addr = event.Addr - 1
+		//addr = event.Addr - 1
+		addr = event.Addr
 	case "arm64":
 		addr = event.Addr
 	}
