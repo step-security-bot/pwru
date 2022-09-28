@@ -83,17 +83,28 @@ func main() {
 	var opts ebpf.CollectionOptions
 	opts.Programs.KernelTypes = btfSpec
 
+	hasKprobeMulti := pwru.HaveBPFLinkKprobeMulti()
+
 	if flags.OutputSkb {
 		objs := KProbePWRUObjects{}
 		if err := LoadKProbePWRUObjects(&objs, &opts); err != nil {
 			log.Fatalf("Loading objects: %v", err)
 		}
 		defer objs.Close()
-		kprobe1 = objs.KprobeSkb1
-		kprobe2 = objs.KprobeSkb2
-		kprobe3 = objs.KprobeSkb3
-		kprobe4 = objs.KprobeSkb4
-		kprobe5 = objs.KprobeSkb5
+		if hasKprobeMulti {
+			kprobe1 = objs.KprobeMultiSkb1
+			kprobe2 = objs.KprobeMultiSkb2
+			kprobe3 = objs.KprobeMultiSkb3
+			kprobe4 = objs.KprobeMultiSkb4
+			kprobe5 = objs.KprobeMultiSkb5
+		} else {
+			kprobe1 = objs.KprobeSkb1
+			kprobe2 = objs.KprobeSkb2
+			kprobe3 = objs.KprobeSkb3
+			kprobe4 = objs.KprobeSkb4
+			kprobe5 = objs.KprobeSkb5
+
+		}
 		cfgMap = objs.CfgMap
 		events = objs.Events
 		printSkbMap = objs.PrintSkbMap
@@ -104,11 +115,20 @@ func main() {
 			log.Fatalf("Loading objects: %v", err)
 		}
 		defer objs.Close()
-		kprobe1 = objs.KprobeSkb1
-		kprobe2 = objs.KprobeSkb2
-		kprobe3 = objs.KprobeSkb3
-		kprobe4 = objs.KprobeSkb4
-		kprobe5 = objs.KprobeSkb5
+		if hasKprobeMulti {
+			kprobe1 = objs.KprobeMultiSkb1
+			kprobe2 = objs.KprobeMultiSkb2
+			kprobe3 = objs.KprobeMultiSkb3
+			kprobe4 = objs.KprobeMultiSkb4
+			kprobe5 = objs.KprobeMultiSkb5
+		} else {
+			kprobe1 = objs.KprobeSkb1
+			kprobe2 = objs.KprobeSkb2
+			kprobe3 = objs.KprobeSkb3
+			kprobe4 = objs.KprobeSkb4
+			kprobe5 = objs.KprobeSkb5
+
+		}
 		cfgMap = objs.CfgMap
 		events = objs.Events
 		printStackMap = objs.PrintStackMap
@@ -136,10 +156,15 @@ func main() {
 		}
 	}()
 
-	log.Println("Attaching kprobes...")
+	msg := "kprobe"
+	if hasKprobeMulti {
+		msg = "kprobe-multi"
+	}
+	log.Printf("Attaching kprobes (via %s)...\n", msg)
 	ignored := 0
 	bar := pb.StartNew(len(funcs))
-	for name, pos := range funcs {
+	funcsByPos := pwru.GetFuncsByPos(funcs)
+	for pos, fns := range funcsByPos {
 		var fn *ebpf.Program
 		switch pos {
 		case 1:
@@ -156,21 +181,40 @@ func main() {
 			ignored += 1
 			continue
 		}
-		select {
-		case <-ctx.Done():
-			return
-		default:
-		}
 
-		kp, err := link.Kprobe(name, fn, nil)
-		bar.Increment()
-		if err != nil {
-			if !errors.Is(err, os.ErrNotExist) {
-				log.Fatalf("Opening kprobe %s: %s\n", name, err)
-			} else {
-				ignored += 1
+		if !hasKprobeMulti {
+			for _, name := range fns {
+				select {
+				case <-ctx.Done():
+					return
+				default:
+				}
+
+				kp, err := link.Kprobe(name, fn, nil)
+				bar.Increment()
+				if err != nil {
+					if !errors.Is(err, os.ErrNotExist) {
+						log.Fatalf("Opening kprobe %s: %s\n", name, err)
+					} else {
+						ignored += 1
+					}
+				} else {
+					kprobes = append(kprobes, kp)
+				}
 			}
 		} else {
+			select {
+			case <-ctx.Done():
+				return
+			default:
+			}
+
+			opts := link.KprobeMultiOptions{Symbols: funcsByPos[pos]}
+			kp, err := link.KprobeMulti(fn, opts)
+			bar.Add(len(fns))
+			if err != nil {
+				log.Fatalf("Opening kprobe-multi for pos %d: %s\n", pos, err)
+			}
 			kprobes = append(kprobes, kp)
 		}
 	}
@@ -193,7 +237,7 @@ func main() {
 
 	log.Println("Listening for events..")
 
-	output := pwru.NewOutput(&flags, printSkbMap, printStackMap, addr2name)
+	output := pwru.NewOutput(&flags, printSkbMap, printStackMap, addr2name, hasKprobeMulti)
 	output.PrintHeader()
 
 	defer func() {

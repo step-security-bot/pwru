@@ -115,6 +115,14 @@ func GetFuncs(pattern string, spec *btf.Spec, kmods []string) (Funcs, error) {
 	return funcs, nil
 }
 
+func GetFuncsByPos(funcs Funcs) map[int][]string {
+	ret := make(map[int][]string)
+	for fn, pos := range funcs {
+		ret[pos] = append(ret[pos], fn)
+	}
+	return ret
+}
+
 // Very hacky way to check whether multi-link kprobe is supported.
 func HaveBPFLinkKprobeMulti() bool {
 	prog, err := ebpf.NewProgram(&ebpf.ProgramSpec{
